@@ -5,10 +5,12 @@ Solo libreria standard: deployabile ovunque giri Python 3 (Render, Fly, un VPS..
 Avvio:  python3 relay.py   (porta da $PORT, default 9090)
 
 Protocollo (JSON su WebSocket):
-  client -> server: {"op":"create"} | {"op":"join","code":"ABCD"} | {"op":"msg","data":"..."}
+  client -> server: {"op":"create"} | {"op":"join","code":"ABCD"} | {"op":"queue"}
+                    | {"op":"msg","data":"..."}
   server -> client: {"op":"created","code":"ABCD"} | {"op":"start","role":"A"|"B"}
                     | {"op":"msg","data":"..."} | {"op":"peer_left"} | {"op":"error","reason":"..."}
-Il campo "data" è opaco: il relay non lo interpreta mai.
+"queue" = matchmaking automatico: i primi due client in coda vengono accoppiati.
+Il campo "data" e' opaco: il relay non lo interpreta mai.
 """
 import base64
 import hashlib
@@ -20,6 +22,7 @@ import threading
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 rooms = {}       # code -> [Client, ...]
+queue = []       # client in attesa di matchmaking automatico
 rooms_lock = threading.Lock()
 
 
@@ -142,7 +145,23 @@ def handle(client):
                     room[0].send({"op": "start", "role": "A"})
                     client.send({"op": "start", "role": "B"})
                 else:
-                    client.send({"op": "error", "reason": "Codice non valido o partita già piena."})
+                    client.send({"op": "error", "reason": "Codice non valido o partita gia' piena."})
+            elif op == "queue":
+                paired = None
+                with rooms_lock:
+                    if client in queue:
+                        continue
+                    if queue:
+                        paired = queue.pop(0)
+                        code = "@" + "".join(random.choice("0123456789") for _ in range(6))
+                        rooms[code] = [paired, client]
+                        paired.code = code
+                        client.code = code
+                    else:
+                        queue.append(client)
+                if paired:
+                    paired.send({"op": "start", "role": "A"})
+                    client.send({"op": "start", "role": "B"})
             elif op == "msg":
                 for peer in peers_of(client):
                     peer.send({"op": "msg", "data": msg.get("data", "")})
@@ -153,6 +172,8 @@ def handle(client):
             peer.send({"op": "peer_left"})
         with rooms_lock:
             rooms.pop(client.code, None)
+            if client in queue:
+                queue.remove(client)
         try:
             client.sock.close()
         except OSError:
